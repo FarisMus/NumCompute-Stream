@@ -22,6 +22,23 @@ def test_max_depth_zero_predicts_training_majority():
     np.testing.assert_array_equal(tree.predict([[0], [2]]), [1, 1])
 
 
+def test_binary_features_choose_the_highest_information_gain_question():
+    X = np.array([[0, 0], [0, 1], [1, 0], [1, 1]], dtype=float)
+    y = np.array([0, 0, 1, 1])
+    tree = DecisionTreeClassifier(max_depth=1).fit(X, y)
+
+    assert tree.tree_.feature == 0
+    assert tree.tree_.threshold == 0.5
+    np.testing.assert_array_equal(tree.predict(X), y)
+
+
+def test_no_positive_gain_stops_at_majority_leaf():
+    tree = DecisionTreeClassifier().fit([[1], [1], [1], [1]], [0, 1, 1, 0])
+
+    assert tree.tree_.is_leaf
+    np.testing.assert_array_equal(tree.predict([[1], [1]]), [0, 0])
+
+
 def test_partial_fit_keeps_old_tree_until_buffer_is_full():
     tree = DecisionTreeClassifier(buffer_size=4).fit([[0], [1]], [0, 1])
 

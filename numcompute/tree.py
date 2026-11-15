@@ -141,6 +141,70 @@ class DecisionTreeClassifier:
             return float(1.0 - np.sum(probabilities * probabilities))
         return float(-np.sum(probabilities * np.log2(probabilities)))
 
+    def _impurity_rows(self, counts: np.ndarray) -> np.ndarray:
+        """Calculate impurity for multiple class-count rows at once."""
+        probabilities = counts / counts.sum(axis=1, keepdims=True)
+        if self.criterion == "gini":
+            return 1.0 - np.sum(probabilities * probabilities, axis=1)
+        safe_probabilities = np.where(probabilities > 0, probabilities, 1.0)
+        return -np.sum(probabilities * np.log2(safe_probabilities), axis=1)
+
+    def _best_split(
+        self,
+        X: np.ndarray,
+        encoded_y: np.ndarray,
+        classes: np.ndarray,
+        rng: np.random.Generator,
+    ) -> tuple[int | None, float | None]:
+        """Return the feature and threshold with the greatest positive gain."""
+        n_features = X.shape[1]
+        n_considered = self._feature_count(n_features)
+        if n_considered == n_features:
+            features = np.arange(n_features)
+        else:
+            features = rng.choice(n_features, size=n_considered, replace=False)
+
+        parent_counts = np.bincount(encoded_y, minlength=classes.size)
+        parent_impurity = self._impurity(parent_counts)
+        best_gain = 0.0
+        best_feature = None
+        best_threshold = None
+
+        for feature in features:
+            order = np.argsort(X[:, feature], kind="stable")
+            sorted_values = X[order, feature]
+            sorted_y = encoded_y[order]
+            boundaries = np.flatnonzero(sorted_values[:-1] < sorted_values[1:])
+            if boundaries.size == 0:
+                continue
+
+            left_counts = np.stack(
+                [
+                    np.cumsum(sorted_y == class_index, dtype=np.int64)[boundaries]
+                    for class_index in range(classes.size)
+                ],
+                axis=1,
+            )
+            right_counts = parent_counts - left_counts
+            left_sizes = boundaries + 1
+            right_sizes = encoded_y.size - left_sizes
+            weighted_child_impurity = (
+                left_sizes * self._impurity_rows(left_counts)
+                + right_sizes * self._impurity_rows(right_counts)
+            ) / encoded_y.size
+            gains = parent_impurity - weighted_child_impurity
+            candidate_index = int(np.argmax(gains))
+            if gains[candidate_index] > best_gain:
+                boundary = boundaries[candidate_index]
+                lower = sorted_values[boundary]
+                upper = sorted_values[boundary + 1]
+                threshold = lower / 2.0 + upper / 2.0
+                best_gain = float(gains[candidate_index])
+                best_feature = int(feature)
+                best_threshold = float(threshold if lower <= threshold < upper else lower)
+
+        return best_feature, best_threshold
+
     def _build_tree(
         self,
         X: np.ndarray,
@@ -160,49 +224,7 @@ class DecisionTreeClassifier:
         ):
             return node
 
-        n_features = X.shape[1]
-        n_considered = self._feature_count(n_features)
-        if n_considered == n_features:
-            features = np.arange(n_features)
-        else:
-            features = rng.choice(n_features, size=n_considered, replace=False)
-
-        parent_impurity = self._impurity(counts)
-        best_score = parent_impurity
-        best_feature = None
-        best_threshold = None
-
-        for feature in features:
-            order = np.argsort(X[:, feature], kind="stable")
-            sorted_values = X[order, feature]
-            sorted_y = encoded_y[order]
-            boundaries = np.flatnonzero(sorted_values[:-1] < sorted_values[1:])
-            if boundaries.size == 0:
-                continue
-
-            left_counts = np.zeros(classes.size, dtype=np.int64)
-            previous_boundary = -1
-            for boundary in boundaries:
-                left_counts += np.bincount(
-                    sorted_y[previous_boundary + 1 : boundary + 1],
-                    minlength=classes.size,
-                )
-                left_size = int(boundary + 1)
-                right_size = encoded_y.size - left_size
-                right_counts = counts - left_counts
-                score = (
-                    left_size * self._impurity(left_counts)
-                    + right_size * self._impurity(right_counts)
-                ) / encoded_y.size
-                if score < best_score - 1e-15:
-                    best_score = score
-                    best_feature = int(feature)
-                    lower = sorted_values[boundary]
-                    upper = sorted_values[boundary + 1]
-                    threshold = lower / 2.0 + upper / 2.0
-                    best_threshold = float(threshold if lower <= threshold < upper else lower)
-                previous_boundary = int(boundary)
-
+        best_feature, best_threshold = self._best_split(X, encoded_y, classes, rng)
         if best_feature is None:
             return node
 
@@ -260,9 +282,14 @@ class DecisionTreeClassifier:
             raise ValueError("X must contain only finite numeric values")
 
         predictions = np.empty(X.shape[0], dtype=self.classes_.dtype)
-        for row_index, row in enumerate(X):
-            node = self.tree_
-            while not node.is_leaf:
-                node = node.left if row[node.feature] <= node.threshold else node.right
-            predictions[row_index] = node.prediction
+
+        def assign_predictions(node: _Node, row_indices: np.ndarray) -> None:
+            if node.is_leaf:
+                predictions[row_indices] = node.prediction
+                return
+            goes_left = X[row_indices, node.feature] <= node.threshold
+            assign_predictions(node.left, row_indices[goes_left])
+            assign_predictions(node.right, row_indices[~goes_left])
+
+        assign_predictions(self.tree_, np.arange(X.shape[0]))
         return predictions
