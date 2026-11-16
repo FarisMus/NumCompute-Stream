@@ -43,6 +43,30 @@ class RecordingEstimator:
         return X.sum(axis=1)
 
 
+class RecordingPartialFitEstimator:
+    """A test double that records incremental model updates."""
+
+    def __init__(self):
+        self.partial_fit_calls = []
+
+    def fit(self, X, y):
+        self.fit_X = X.copy()
+        self.fit_y = y.copy()
+        return self
+
+    def partial_fit(self, X, y):
+        self.partial_fit_calls.append((X.copy(), y.copy()))
+        return self
+
+    def predict(self, X):
+        return np.zeros(X.shape[0], dtype=int)
+
+
+class FailingPartialFitEstimator(RecordingPartialFitEstimator):
+    def partial_fit(self, X, y):
+        raise ValueError("update failed")
+
+
 # preprocessing pipelines
 
 def test_fit_transform_matches_numpy(X_nan, numeric_pipe):
@@ -114,6 +138,47 @@ def test_estimator_receives_transformed_data_and_labels():
     assert result.shape == (1,)
     assert result[0] == pytest.approx(6.0)
     assert estimator.fit_calls == 1
+
+
+def test_partial_fit_updates_transformer_and_final_estimator_per_chunk():
+    estimator = RecordingPartialFitEstimator()
+    scaler = StandardScaler()
+    pipe = Pipeline([("scale", scaler), ("model", estimator)])
+    chunks = [
+        (np.array([[0.0], [2.0]]), np.array([0, 1])),
+        (np.array([[4.0], [6.0]]), np.array([1, 0])),
+    ]
+
+    for X_chunk, y_chunk in chunks:
+        assert pipe.partial_fit(X_chunk, y_chunk) is pipe
+
+    assert pipe.is_fitted_
+    assert len(estimator.partial_fit_calls) == len(chunks)
+    np.testing.assert_array_equal(scaler.mean_, [3.0])
+    np.testing.assert_array_equal(estimator.partial_fit_calls[0][1], chunks[0][1])
+    np.testing.assert_array_equal(estimator.partial_fit_calls[1][1], chunks[1][1])
+    np.testing.assert_allclose(estimator.partial_fit_calls[0][0], [[-1.0], [1.0]])
+    np.testing.assert_allclose(
+        estimator.partial_fit_calls[1][0], [[1.0 / np.sqrt(5.0)], [3.0 / np.sqrt(5.0)]]
+    )
+
+
+def test_failed_partial_fit_clears_pipeline_fitted_state():
+    pipe = Pipeline([
+        ("scale", StandardScaler()),
+        ("model", FailingPartialFitEstimator()),
+    ])
+    X = np.array([[0.0], [2.0]])
+    y = np.array([0, 1])
+    pipe.fit(X, y)
+    assert pipe.is_fitted_
+
+    with pytest.raises(ValueError, match="update failed"):
+        pipe.partial_fit(X, y)
+
+    assert not pipe.is_fitted_
+    with pytest.raises(ValueError, match="fit"):
+        pipe.predict(X)
 
 
 # invalid operations and inputs

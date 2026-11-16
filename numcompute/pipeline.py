@@ -325,7 +325,9 @@ class Pipeline:
         Intermediate steps that implement ``partial_fit`` are updated online.
         If they do not, they are refit on the currently available chunk. The
         final step receives the transformed features and, if given, the labels.
+        The pipeline is marked fitted only after every step completes.
         """
+        self.is_fitted_ = False
         X_out = X
         for name, step in self.steps[:-1]:
             if callable(getattr(step, "partial_fit", None)):
