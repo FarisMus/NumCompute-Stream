@@ -434,10 +434,6 @@ class RunningStats:
         self.n = n_new
         return self
 
-    def update_stats(self, x: np.ndarray) -> "RunningStats":
-        """Update running mean, variance and extrema from a new chunk."""
-        return self.update(x)
-
     def var(self, ddof: int = 0) -> np.ndarray:
         """Return the accumulated per-feature variance.
 
@@ -495,127 +491,6 @@ class RunningStats:
         Time and output space: O(d).
         """
         return np.sqrt(self.var(ddof))
-
-
-class StreamingStats:
-    """Accumulate chunked statistics, including exact quantiles and histograms.
-
-    Parameters
-    ----------
-    skip_nan : bool, default False
-        If true, discard entire rows containing NaN, matching
-        :class:`RunningStats`.
-    window_size : int or None, default None
-        If supplied, retain only the most recent number of rows and compute all
-        exposed statistics over that rolling window. Otherwise, exact
-        quantiles and histograms are supported by retaining all received rows.
-
-    Notes
-    -----
-    ``update_stats(X_chunk)`` is the chunk-update API. Exact quantiles require
-    retaining samples, so memory is O(total samples * features) without a
-    window and O(window_size * features) with one.
-    """
-
-    def __init__(self, skip_nan: bool = False, window_size: int | None = None):
-        if window_size is not None and (
-            isinstance(window_size, bool)
-            or not isinstance(window_size, (int, np.integer))
-            or window_size < 1
-        ):
-            raise ValueError("window_size must be a positive integer or None")
-        self.skip_nan = skip_nan
-        self.window_size = None if window_size is None else int(window_size)
-        self._running = RunningStats(skip_nan=skip_nan)
-        self._values = None
-
-    @property
-    def n(self) -> int:
-        """Number of rows currently included in the accumulated statistics."""
-        return self._running.n
-
-    @property
-    def mean(self) -> np.ndarray:
-        """Per-feature mean over all samples or the current rolling window."""
-        if self.n == 0:
-            raise RuntimeError("no data yet; call update_stats() first")
-        return self._running.mean
-
-    @property
-    def min(self) -> np.ndarray:
-        """Per-feature minimum over all samples or the current rolling window."""
-        if self.n == 0:
-            raise RuntimeError("no data yet; call update_stats() first")
-        return self._running.min
-
-    @property
-    def max(self) -> np.ndarray:
-        """Per-feature maximum over all samples or the current rolling window."""
-        if self.n == 0:
-            raise RuntimeError("no data yet; call update_stats() first")
-        return self._running.max
-
-    def update_stats(self, X_chunk: np.ndarray) -> "StreamingStats":
-        """Accumulate one chunk of observations and return this accumulator.
-
-        A 1-D input represents multiple samples of one feature, consistent
-        with :meth:`RunningStats.update`. With ``skip_nan=True``, rows with
-        any NaN are discarded.
-        """
-        X_chunk = np.asarray(X_chunk, dtype=float)
-        if X_chunk.ndim < 2:
-            X_chunk = X_chunk.reshape(-1, 1)
-        if X_chunk.ndim != 2:
-            raise ValueError(f"chunk must be at most 2-D, got shape {X_chunk.shape}")
-        if self._values is not None and X_chunk.shape[1] != self._values.shape[1]:
-            raise ValueError(
-                f"expected {self._values.shape[1]} features, got {X_chunk.shape[1]}"
-            )
-
-        if self.skip_nan:
-            X_chunk = X_chunk[~np.isnan(X_chunk).any(axis=1)]
-        if X_chunk.shape[0] == 0:
-            return self
-
-        if self.window_size is None:
-            self._running.update(X_chunk)
-            if self._values is None:
-                self._values = X_chunk.copy()
-            else:
-                self._values = np.concatenate((self._values, X_chunk), axis=0)
-            return self
-
-        if self._values is None:
-            combined = X_chunk.copy()
-        else:
-            combined = np.concatenate((self._values, X_chunk), axis=0)
-        self._values = combined[-self.window_size :].copy()
-        self._running = RunningStats(skip_nan=self.skip_nan).update(self._values)
-        return self
-
-    def update(self, X_chunk: np.ndarray) -> "StreamingStats":
-        """Alias for :meth:`update_stats`."""
-        return self.update_stats(X_chunk)
-
-    def var(self, ddof: int = 0) -> np.ndarray:
-        """Return per-feature variance over all retained samples."""
-        return self._running.var(ddof)
-
-    def std(self, ddof: int = 0) -> np.ndarray:
-        """Return per-feature standard deviation over all retained samples."""
-        return self._running.std(ddof)
-
-    def quantile(self, q, axis: int = 0, method: str = "linear"):
-        """Return exact quantiles over accumulated or windowed samples."""
-        if self._values is None:
-            raise RuntimeError("no data yet; call update_stats() first")
-        return quantile(self._values, q, axis=axis, method=method, skip_nan=self.skip_nan)
-
-    def histogram(self, bins=10, range: tuple = None, density: bool = False):
-        """Return a histogram of all accumulated or windowed values."""
-        if self._values is None:
-            raise RuntimeError("no data yet; call update_stats() first")
-        return histogram(self._values, bins=bins, range=range, density=density)
 
 
 if __name__ == "__main__":
