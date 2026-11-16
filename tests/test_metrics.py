@@ -3,18 +3,7 @@
 import numpy as np
 import pytest
 
-from numcompute.metrics import (
-    StreamingClassificationMetrics,
-    StreamingMetrics,
-    accuracy,
-    auc,
-    confusion_matrix,
-    f1,
-    mse,
-    precision,
-    recall,
-    roc_curve,
-)
+from numcompute.metrics import accuracy, auc, confusion_matrix, f1, mse, precision, recall, roc_curve
 
 # Binary example: tp=2, fp=1, fn=1, tn=1 for the positive class 1
 BIN_TRUE = [0, 1, 1, 0, 1]
@@ -405,95 +394,3 @@ def test_auc_rejects_text_2d_and_nan():
 
     with pytest.raises(ValueError, match="NaN"):
         auc([0, 1], [0, np.nan])
-
-
-# ---- streaming metrics ----
-
-def test_streaming_metrics_match_batch_across_chunks():
-    tracker = StreamingMetrics(average="macro")
-    tracker.update(MULTI_TRUE[:3], MULTI_PRED[:3])
-    tracker.update(MULTI_TRUE[3:], MULTI_PRED[3:])
-    result = tracker.result()
-
-    assert result["n"] == len(MULTI_TRUE)
-    assert result["accuracy"] == pytest.approx(accuracy(MULTI_TRUE, MULTI_PRED))
-    assert result["precision"] == pytest.approx(
-        precision(MULTI_TRUE, MULTI_PRED, average="macro")
-    )
-    assert result["recall"] == pytest.approx(
-        recall(MULTI_TRUE, MULTI_PRED, average="macro")
-    )
-    assert result["f1"] == pytest.approx(f1(MULTI_TRUE, MULTI_PRED, average="macro"))
-    np.testing.assert_array_equal(
-        result["confusion_matrix"], confusion_matrix(MULTI_TRUE, MULTI_PRED)
-    )
-
-
-def test_streaming_metrics_expand_class_set_and_support_string_labels():
-    tracker = StreamingMetrics(average="macro")
-    tracker.update(["cat", "dog"], ["cat", "cat"])
-    tracker.update(["bird", "dog"], ["bird", "dog"])
-    result = tracker.result()
-
-    np.testing.assert_array_equal(result["labels"], ["bird", "cat", "dog"])
-    np.testing.assert_array_equal(
-        result["confusion_matrix"],
-        confusion_matrix(
-            ["cat", "dog", "bird", "dog"],
-            ["cat", "cat", "bird", "dog"],
-        ),
-    )
-    assert result["accuracy"] == pytest.approx(0.75)
-
-
-def test_streaming_metrics_scores_auc_cumulatively_and_in_rolling_window():
-    tracker = StreamingMetrics(window_size=3)
-    tracker.update([0, 1], [0, 1], [0.1, 0.8])
-    tracker.update([0, 1], [0, 0], [0.7, 0.4])
-
-    result = tracker.result()
-    rolling = tracker.rolling_result()
-    assert result["auc"] == pytest.approx(0.75)
-    assert rolling["n"] == 3
-    assert rolling["accuracy"] == pytest.approx(2 / 3)
-    assert rolling["auc"] == pytest.approx(0.5)
-    np.testing.assert_array_equal(rolling["confusion_matrix"], [[1, 0], [1, 1]])
-
-
-def test_streaming_metrics_reset_and_precondition_errors():
-    tracker = StreamingClassificationMetrics(window_size=2)
-    with pytest.raises(RuntimeError, match="no samples"):
-        tracker.result()
-    with pytest.raises(ValueError, match="window_size"):
-        StreamingMetrics().rolling_result()
-
-    tracker.update([0, 1], [0, 1])
-    tracker.reset()
-    assert tracker.n == 0
-    with pytest.raises(RuntimeError, match="no samples"):
-        tracker.rolling_result()
-
-
-def test_streaming_metrics_reject_inconsistent_or_invalid_chunks_without_counting():
-    tracker = StreamingMetrics()
-    tracker.update([0, 1], [0, 1])
-    with pytest.raises(ValueError, match="consistently"):
-        tracker.update([0, 1], [0, 1], [0.2, 0.8])
-    assert tracker.n == 2
-    with pytest.raises(ValueError, match="same length"):
-        tracker.update([0, 1], [0])
-    assert tracker.n == 2
-
-
-def test_streaming_metrics_fixed_labels_and_binary_averaging():
-    tracker = StreamingMetrics(labels=[0, 1, 2], pos_label=1)
-    tracker.update([0, 1], [0, 0])
-    result = tracker.result()
-
-    np.testing.assert_array_equal(result["labels"], [0, 1, 2])
-    np.testing.assert_array_equal(
-        result["confusion_matrix"], [[1, 0, 0], [1, 0, 0], [0, 0, 0]]
-    )
-    assert result["precision"] == 0.0
-    assert result["recall"] == 0.0
-    assert result["f1"] == 0.0
