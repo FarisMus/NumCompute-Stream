@@ -7,7 +7,7 @@ from typing import Any
 
 import numpy as np
 
-from .metrics import accuracy
+from numcompute.metrics import accuracy
 
 
 class StreamTrainer:

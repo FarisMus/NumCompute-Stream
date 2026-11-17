@@ -18,7 +18,7 @@ test = ["pytest>=7"]
 visualization = ["matplotlib>=3.5"]
 
 [tool.setuptools]
-packages = ["numcompute"]
+packages = ["numcompute", "numcompute_stream"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

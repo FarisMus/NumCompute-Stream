@@ -27,14 +27,21 @@ NumCompute/
 │   ├── pipeline.py
 │   ├── utils.py
 │   └── benchmarking.py
+├── numcompute_stream/
+│   ├── init.py
+│   ├── stream.py
+│   ├── tree.py
+│   └── visualise.py
 ├── tests/
 │   └── README.md
 ├── benchmark/
 │   ├── loops.py              # plain-Python versions (the "loop" side)
 │   ├── run_benchmarks.py     # seeded runner, writes results.md
+│   ├── stream_benchmark.py   # streaming buffer and accuracy comparisons
 │   └── results.md            # latest full run
 └── demo/
     ├── quickstart.ipynb
+    ├── stream_demo.ipynb
     ├── generate_sample.py
     ├── data/
     │   └── sample.csv
@@ -71,6 +78,7 @@ python -m pip install ipython ipykernel
 ```
 
 Then open `demo/quickstart.ipynb` and select the `.venv` interpreter as the kernel in your notebook editor.
+For the standalone streaming demonstration, also install `python -m pip install -e ".[visualization]"` and open `demo/stream_demo.ipynb`.
 
 ## API overview and examples
 
@@ -333,7 +341,7 @@ X_ready = pipe.fit_transform(X_train)             # about [[-1.225], [0], [1.225
 new_ready = pipe.transform([[2.0]])               # [[0.0]]; no refitting
 ```
 
-### `numcompute.visualise`: streaming plots
+### `numcompute_stream.visualise`: streaming plots
 
 Matplotlib is an optional dependency and is imported only when a plotting
 function is called. Install it with `python -m pip install -e ".[visualization]"`
@@ -349,7 +357,7 @@ Plots are returned for further customization and are not displayed unless
 `show=True`. Supply `save_path` to write the figure to a file.
 
 ```python
-from numcompute.visualise import plot_metric_over_time
+from numcompute_stream.visualise import plot_metric_over_time
 
 fig, ax = plot_metric_over_time(
     [0.72, 0.78, 0.81],
@@ -393,6 +401,13 @@ print(pairwise_distances([[0.0, 0.0], [3.0, 4.0]]))    # [[0. 5.] [5. 0.]]
 | `format_table()`     | `rows`: list of comparison dicts                                                              | `compare` results as a Markdown table (the columns of the performance table below); an optional `"notes"` entry in a row fills the Notes column | Turn comparison dictionaries into a readable Markdown performance table with timing, speedup and optional explanatory notes for the README or notebook. |
 
 Loop baselines live separately in `benchmark/loops.py`. Data generation and array-to-list conversion happen before timing. `compare` first checks matching results, then reports median runtimes and `speedup = loop_s / vec_s`. Rank, top-k and AUC cases compare algorithm choices as well as vectorization.
+
+For streaming scenarios, `demo/stream_demo.ipynb` uses `benchmark.stream_benchmark`
+to compare tree buffer sizes on the same ordered training chunks and holdout
+rows. It reports retraining count, pending buffered rows, median total chunk
+update time, median time spent inside tree retrains, and holdout accuracy.
+It also checks and times loop-based versus NumPy cumulative accuracy on the
+same prediction chunks. Measurements vary by machine and load.
 
 The following 10 Python-loop baselines are available in `benchmark/loops.py` through `from benchmark import loops`:
 
@@ -501,4 +516,4 @@ The dataset and generator described here follow the repository's `main` branch. 
 
 ### Demo files and directory structure
 
-The directory tree above includes `demo/generate_sample.py`, which generates `demo/data/sample.csv` reproducibly with seed 42, and `demo/quickstart.ipynb` for package demonstrations. The separate `demo/sample.csv` is an older 8-row example with an additional height column for older version testing. To reproduce the documented data, use the generator from `main`.
+The directory tree above includes `demo/generate_sample.py`, which generates `demo/data/sample.csv` reproducibly with seed 42, `demo/quickstart.ipynb` for package demonstrations, and `demo/stream_demo.ipynb` for chunked decision-tree training and evaluation. The separate `demo/sample.csv` is an older 8-row example with an additional height column for older version testing. To reproduce the documented data, use the generator from `main`.

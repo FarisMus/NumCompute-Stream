@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from numcompute.benchmarking import compare, environment_info, format_table, time_function
+from benchmark.stream_benchmark import benchmark_buffer_sizes, benchmark_chunk_accuracy
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -110,3 +111,43 @@ def test_runner_quick_writes_report(tmp_path):
                  "metrics.roc_curve + auc", "preprocessing.StandardScaler", "stats.histogram",
                  "sort_search.stable_sort", "sort_search.topk", "rank.rank"):
         assert case in report
+
+
+def test_stream_buffer_benchmark_counts_retrains_and_pending_rows():
+    X = np.arange(7, dtype=float).reshape(-1, 1)
+    y = np.array([0, 0, 0, 1, 1, 1, 1])
+    results = benchmark_buffer_sizes(
+        X, y, X, y, buffer_sizes=(3, 5), chunk_size=2, repeat=2,
+    )
+
+    assert [row["buffer_size"] for row in results] == [3, 5]
+    assert [row["retrain_count"] for row in results] == [2, 1]
+    assert [row["buffered_samples"] for row in results] == [0, 1]
+    for row in results:
+        assert 0.0 <= row["accuracy"] <= 1.0
+        assert 0 < row["retrain_seconds"] <= row["update_seconds"]
+
+
+def test_stream_buffer_benchmark_rejects_an_unreachable_buffer():
+    with pytest.raises(ValueError, match="training set"):
+        benchmark_buffer_sizes([[0], [1]], [0, 1], [[0]], [0], buffer_sizes=(3,))
+
+
+def test_chunk_accuracy_weights_short_final_chunk(monkeypatch):
+    def check_results(case, loop_func, vec_func, repeat):
+        assert case == "chunked cumulative accuracy"
+        assert repeat == 1
+        assert loop_func() == pytest.approx(3 / 5)
+        assert vec_func() == pytest.approx(3 / 5)
+        return {"case": case}
+
+    monkeypatch.setattr("benchmark.stream_benchmark.compare", check_results)
+    result = benchmark_chunk_accuracy(
+        [0, 1, 1, 0, 1], [0, 1, 0, 1, 1], chunk_size=2, repeat=1,
+    )
+    assert result["case"] == "chunked cumulative accuracy"
+
+
+def test_chunk_accuracy_rejects_mismatched_labels():
+    with pytest.raises(ValueError, match="equal lengths"):
+        benchmark_chunk_accuracy([0, 1], [0])
