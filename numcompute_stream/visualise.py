@@ -1,7 +1,7 @@
 """Reusable plots for streaming metrics and predictions.
 
 Matplotlib is imported only when a plotting function is called, so importing
-NumCompute does not require the optional visualization dependency.
+NumCompute Stream does not require the optional visualization dependency.
 """
 
 from __future__ import annotations

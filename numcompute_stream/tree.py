@@ -7,7 +7,7 @@ from numbers import Integral, Real
 
 import numpy as np
 
-from .utils import check_array
+from numcompute.utils import check_array
 
 
 @dataclass
