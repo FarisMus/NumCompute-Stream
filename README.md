@@ -1,12 +1,11 @@
 # NumCompute
 
-P_AI Assignment 2.1, 2026 S2
+P_AI Assignment 2.2, 2026 S2
 
-Group name: 404 Group Not Found
 
-Demo video link: [A2_Demo_v3](https://drive.google.com/file/d/1OQFyF7AuDpzgdBwg2_W-SpvhwnJK2zzi/view?usp=sharing)
+Individual demo Video: [Demo Video](https://drive.google.com/file/d/1d1mMC6MFTUDIKJEdqVDnHfjkV6nBEslm/view?usp=drive_link)
 
-A scientific computing toolkit built with Python and NumPy. It includes CSV input, preprocessing, sorting/searching, ranking, statistics, metrics, numerical derivatives, pipelines and reproducible benchmarks.
+A scientific computing toolkit built with Python and NumPy. It includes CSV input, preprocessing, sorting/searching, ranking, statistics, metrics, numerical derivatives, pipelines and reproducible benchmarks. The NumCompute-Stream extension adds chunk-based training, a buffered decision tree and streaming visualizations.
 
 ## Required structure
 
@@ -63,8 +62,9 @@ NumCompute/
 Requires Python 3.10+ and NumPy (no other runtime dependencies).
 
 ```bash
-git clone https://github.com/DahaoALG/NumCompute.git
-cd NumCompute
+git clone https://github.com/FarisMus/NumCompute-Stream.git
+cd NumCompute-Stream
+git switch assignment-2/faris-musthafa       # or the branch containing the streaming extension
 python -m venv .venv
 .venv\Scripts\activate          # Windows; on macOS/Linux: source .venv/bin/activate
 pip install -e ".[test]"        # editable install of numcompute, plus pytest
@@ -78,7 +78,53 @@ python -m pip install ipython ipykernel
 ```
 
 Then open `demo/quickstart.ipynb` and select the `.venv` interpreter as the kernel in your notebook editor.
-For the standalone streaming demonstration, also install `python -m pip install -e ".[visualization]"` and open `demo/stream_demo.ipynb`.
+
+For streaming plots and the standalone streaming notebook, install the visualization extra:
+
+```bash
+python -m pip install -e ".[visualization]"
+```
+
+Open `demo/stream_demo.ipynb`, select the environment as its kernel, restart the kernel and choose **Run All**. The notebook loads `demo/data/sample.csv`, trains on ordered chunks, evaluates a separate holdout set, displays plots and compares buffer sizes. It loads the CSV into memory before chunking, so it simulates a stream rather than reading the file incrementally.
+
+## NumCompute-Stream quick start
+
+The following example trains on two chunks and scores a separate holdout chunk. Run it from the project root after installation:
+
+```python
+import numpy as np
+from numcompute.metrics import StreamingMetrics
+from numcompute.pipeline import Pipeline
+from numcompute_stream.stream import StreamTrainer
+from numcompute_stream.tree import DecisionTreeClassifier
+
+X_train = np.array([[1.0, 10.0], [2.0, 12.0], [8.0, 30.0], [9.0, 32.0]])
+y_train = np.array(["low", "low", "high", "high"])
+X_holdout = np.array([[1.5, 11.0], [8.5, 31.0]])
+y_holdout = np.array(["low", "high"])
+
+tree = DecisionTreeClassifier(max_depth=3, buffer_size=4)
+pipeline = Pipeline([("tree", tree)])
+trainer = StreamTrainer(tree, pipeline=pipeline)
+
+for start in range(0, len(y_train), 2):
+    trainer.fit_chunk(X_train[start:start + 2], y_train[start:start + 2])
+
+print("Holdout accuracy:", trainer.score_chunk(X_holdout, y_holdout))
+predictions = pipeline.predict(X_holdout)
+metrics = StreamingMetrics(average="macro", window_size=4)
+metrics.update(y_holdout, predictions)
+print("Predictions:", predictions)
+print("Macro F1:", metrics.result()["f1"])
+print("Rolling accuracy:", metrics.rolling_result()["accuracy"])
+print("Training and scoring logs:", trainer.get_history())
+```
+
+`StreamTrainer` uses the supplied pipeline for training and prediction; without a pipeline, it uses the model directly. It prefers `partial_fit` and falls back to `fit` if the estimator has no `partial_fit`. `get_history()` returns logged entries, and `reset()` clears the history and cumulative scoring counters, not the model.
+
+The tree trains only when its buffer contains at least `buffer_size` rows. A chunk can cross the threshold, so a retrain may use more rows than the threshold. Until the first retrain, prediction and scoring fail because no fitted tree exists; afterwards, the previous tree remains available between retrains. Each retrain uses only rows buffered since the last retrain. Rows left below the threshold remain pending, and calling `fit()` replaces the tree and clears them.
+
+Use raw features with the buffered tree or ensure preprocessing stays consistent across chunks: an updating scaler can place rows in different coordinate systems within one buffer. The tree predicts labels, not probability scores, so the example does not calculate AUC. For running statistics and additional metric options, see the statistics and evaluation sections below; for plots and buffer-size benchmarks, see the visualization and benchmarking sections.
 
 ## API overview and examples
 
@@ -321,6 +367,7 @@ print(J)                                          # about [[6, 1], [4, 3]]
 | ------------------------ | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `Pipeline()`           | `steps`: nonempty list of `(unique_name, component)` pairs              | A new unfitted Pipeline holding the supplied named component objects in order; components are stored by reference and fitted in place.            | Connect reusable preprocessing steps and an optional final estimator so each component receives the previous step's output through a consistent interface.               |
 | `pipe.fit()`           | `X` `(n, d)`; `y=None` (forwarded to a final estimator when supplied) | The same pipeline instance (`self`) after successful fitting; intermediate preprocessors and the final component retain their learned state.    | Fit and transform each intermediate step, then fit the final component. Targets y are passed only to a final estimator providing predict when y is supplied.             |
+| `pipe.partial_fit()`   | `X` `(n, d)`; `y=None` | The same pipeline instance after a successful chunk update. | Incrementally update and transform through intermediate steps, then update the final component. |
 | `pipe.transform()`     | New `X` with compatible features                                          | The final transformer's output, usually a NumPy array `(n, c)`; the number of columns depends on the transformations, such as one-hot encoding. | Pass new rows through every fitted transformer in sequence without relearning statistics. The final component must also provide transform.                               |
 | `pipe.fit_transform()` | `X`; `y=None`; final step must provide `transform`                    | The transformed training data from the final transformer, usually `(n, c)`, with all learned preprocessing state retained in the pipeline.      | Fit the chain and then transform the same training input in one call. Intended for transformer-ending pipelines; estimator-only final steps instead use fit and predict. |
 | `pipe.predict()`       | New `X`; final step must provide `predict`                              | The final estimator's predictions, usually one label or numeric value per row `(n,)`; the estimator determines the exact output type and shape. | Transform new features using the fitted intermediate steps, then call the final estimator's predict method. Pipeline itself does not implement a prediction algorithm.   |
@@ -474,7 +521,7 @@ Run all tests from the project root after installing the test dependencies with 
 python -m pytest tests -q
 ```
 
-Latest local verification (16 November 2026): **247 tests passed** across 11 test files.
+Latest local verification (19 November 2026): **266 tests passed** across 12 test files.
 
 | Test file                 | Coverage                                                                                                                                                        |
 | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -488,6 +535,8 @@ Latest local verification (16 November 2026): **247 tests passed** across 11 tes
 | `test_pipeline.py`      | Chained preprocessing, reuse of fitted parameters, estimator fit/predict dispatch, fitted-state errors, failed refits and feature-count checks.                 |
 | `test_utils.py`         | Array validation, row-batch views, lazy iterable batching, invalid batch sizes, overflow-free logsumexp/softmax/sigmoid, infinite/NaN inputs and distances far from the origin. |
 | `test_benchmarking.py`  | Timing output/call counts, result-equivalence checks, validation, environment/table formatting and all 10 quick benchmark cases through the runner.             |
+| `test_tree.py`          | Decision-tree splits, buffered retraining, fitted-state checks and invalid inputs. |
+| `test_visualise.py`     | Streaming plots, file saving, label handling and invalid inputs. |
 
 Edge cases include empty arrays, all-equal values, duplicates/ties, NaNs, non-contiguous array views and invalid types/shapes. Benchmark tests verify correctness and report generation rather than requiring a fixed runtime or speedup, since timings depend on the machine.
 
