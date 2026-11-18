@@ -1,4 +1,4 @@
-"""Scalers, imputer and one-hot encoder with the fit / transform / fit_transform API.
+"""Scalers, imputer and one-hot encoder with batch and incremental fitting.
 
 X is always (n_samples, n_features). Column statistics ignore NaN; NaN passes
 through transform unchanged, so impute first if that is not wanted.
@@ -99,12 +99,69 @@ class StandardScaler:
         including dtype conversion and NumPy reduction temporaries; stored state O(n_features).
         All-NaN columns retain NaN statistics and may emit NumPy warnings.
         """
-        X = check_array(X, ndim=2)
+        for attribute in ("n_features_in_", "_count_", "_mean_", "_m2_", "mean_", "scale_", "n_samples_seen_"):
+            self.__dict__.pop(attribute, None)
+        return self.partial_fit(X)
 
-        self.mean_ = np.nanmean(X, axis=0)
-        self.scale_ = np.nanstd(X, axis=0)
-        self.scale_[self.scale_ == 0] = 1.0       # constant column: do not divide by zero
-        self.n_features_in_ = X.shape[1]
+    def partial_fit(self, X: np.ndarray) -> "StandardScaler":
+        """Update running means and variances from one chunk, ignoring NaNs.
+
+        Running moments are merged with the parallel Welford formula, so
+        memory use remains O(n_features), independent of the number of chunks.
+        """
+        X = check_array(X, ndim=2)
+        if hasattr(self, "n_features_in_") and X.shape[1] != self.n_features_in_:
+            raise ValueError(f"expected {self.n_features_in_} features, got shape {X.shape}")
+        if not hasattr(self, "_count_"):
+            self.n_features_in_ = X.shape[1]
+            self._count_ = np.zeros(X.shape[1], dtype=np.int64)
+            self._mean_ = np.zeros(X.shape[1], dtype=float)
+            self._m2_ = np.zeros(X.shape[1], dtype=float)
+
+        valid = ~np.isnan(X)
+        chunk_count = valid.sum(axis=0)
+        anchors = np.where(
+            chunk_count > 0,
+            X[np.argmax(valid, axis=0), np.arange(X.shape[1])],
+            0.0,
+        )
+        centered = np.where(valid, X - anchors, 0.0)
+        chunk_mean = anchors + np.divide(
+            centered.sum(axis=0),
+            chunk_count,
+            out=np.zeros(X.shape[1], dtype=float),
+            where=chunk_count > 0,
+        )
+        chunk_m2 = np.sum(np.where(valid, (X - chunk_mean) ** 2, 0.0), axis=0)
+
+        total_count = self._count_ + chunk_count
+        delta = chunk_mean - self._mean_
+        fraction = np.divide(
+            chunk_count,
+            total_count,
+            out=np.zeros(X.shape[1], dtype=float),
+            where=total_count > 0,
+        )
+        cross_weight = np.divide(
+            self._count_ * chunk_count,
+            total_count,
+            out=np.zeros(X.shape[1], dtype=float),
+            where=total_count > 0,
+        )
+        self._mean_ += delta * fraction
+        self._m2_ += chunk_m2 + delta**2 * cross_weight
+        self._count_ = total_count
+
+        self.mean_ = np.where(self._count_ > 0, self._mean_, np.nan)
+        variance = np.divide(
+            self._m2_,
+            self._count_,
+            out=np.full(X.shape[1], np.nan, dtype=float),
+            where=self._count_ > 0,
+        )
+        self.scale_ = np.sqrt(variance)
+        self.scale_[self.scale_ == 0] = 1.0
+        self.n_samples_seen_ = self._count_.copy()
         return self
 
     def transform(self, X: np.ndarray) -> np.ndarray:
@@ -257,12 +314,36 @@ class MinMaxScaler:
         including dtype conversion and NumPy reduction temporaries; stored state O(n_features).
         All-NaN columns retain NaN statistics and may emit NumPy warnings.
         """
-        X = check_array(X, ndim=2)
+        for attribute in (
+            "n_features_in_", "_data_min_", "_data_max_", "_count_",
+            "data_min_", "data_range_", "n_samples_seen_",
+        ):
+            self.__dict__.pop(attribute, None)
+        return self.partial_fit(X)
 
-        self.data_min_ = np.nanmin(X, axis=0)
-        self.data_range_ = np.nanmax(X, axis=0) - self.data_min_
-        self.data_range_[self.data_range_ == 0] = np.inf   # constant column: (x - min) / inf = 0
-        self.n_features_in_ = X.shape[1]
+    def partial_fit(self, X: np.ndarray) -> "MinMaxScaler":
+        """Update each feature's observed minimum and maximum from a chunk."""
+        X = check_array(X, ndim=2)
+        if hasattr(self, "n_features_in_") and X.shape[1] != self.n_features_in_:
+            raise ValueError(f"expected {self.n_features_in_} features, got shape {X.shape}")
+        if not hasattr(self, "_data_min_"):
+            self.n_features_in_ = X.shape[1]
+            self._data_min_ = np.full(X.shape[1], np.inf)
+            self._data_max_ = np.full(X.shape[1], -np.inf)
+            self._count_ = np.zeros(X.shape[1], dtype=np.int64)
+
+        valid = ~np.isnan(X)
+        chunk_count = valid.sum(axis=0)
+        chunk_min = np.min(np.where(valid, X, np.inf), axis=0)
+        chunk_max = np.max(np.where(valid, X, -np.inf), axis=0)
+        self._data_min_ = np.minimum(self._data_min_, chunk_min)
+        self._data_max_ = np.maximum(self._data_max_, chunk_max)
+        self._count_ += chunk_count
+        self.data_min_ = np.where(self._count_ > 0, self._data_min_, np.nan)
+        data_max = np.where(self._count_ > 0, self._data_max_, np.nan)
+        self.data_range_ = data_max - self.data_min_
+        self.data_range_[self.data_range_ == 0] = np.inf
+        self.n_samples_seen_ = self._count_.copy()
         return self
 
     def transform(self, X: np.ndarray) -> np.ndarray:
@@ -466,21 +547,79 @@ class SimpleImputer:
         O(n_features * n_samples * log(n_samples)) bound. Space: O(n_samples * n_features).
         All-NaN numeric columns use fill_value instead of a mean or median.
         """
+        for attribute in (
+            "n_features_in_", "_observed_count_", "_running_mean_",
+            "_median_values_", "statistics_",
+        ):
+            self.__dict__.pop(attribute, None)
+        return self.partial_fit(X)
+
+    def partial_fit(self, X: np.ndarray) -> "SimpleImputer":
+        """Update imputation statistics using one additional data chunk.
+
+        Mean estimates are updated with bounded state. Exact median estimates
+        retain each observed value, since an exact median cannot generally be
+        recovered from a fixed-size summary.
+        """
         X = self._as_array(X)
         n_features = X.shape[1]
+        if hasattr(self, "n_features_in_") and n_features != self.n_features_in_:
+            raise ValueError(f"expected {self.n_features_in_} features, got shape {X.shape}")
+        if not hasattr(self, "n_features_in_"):
+            self.n_features_in_ = n_features
+            if self.strategy != "constant":
+                self._observed_count_ = np.zeros(n_features, dtype=np.int64)
+                if self.strategy == "mean":
+                    self._running_mean_ = np.zeros(n_features, dtype=float)
+                else:
+                    self._median_values_ = [np.empty(0, dtype=float) for _ in range(n_features)]
 
         if self.strategy == "constant":
             self.statistics_ = np.full(n_features, self.fill_value)
-        else:
-            all_nan = np.isnan(X).all(axis=0)
-            X_safe = np.where(all_nan, 0.0, X)      # nanmean warns on an all-NaN column
-            if self.strategy == "mean":
-                self.statistics_ = np.nanmean(X_safe, axis=0)
-            else:
-                self.statistics_ = np.nanmedian(X_safe, axis=0)
-            self.statistics_[all_nan] = self.fill_value
+            return self
 
-        self.n_features_in_ = n_features
+        valid = ~np.isnan(X)
+        chunk_count = valid.sum(axis=0)
+        if self.strategy == "mean":
+            anchors = np.where(
+                chunk_count > 0,
+                X[np.argmax(valid, axis=0), np.arange(n_features)],
+                0.0,
+            )
+            centered = np.where(valid, X - anchors, 0.0)
+            chunk_mean = anchors + np.divide(
+                centered.sum(axis=0),
+                chunk_count,
+                out=np.zeros(n_features, dtype=float),
+                where=chunk_count > 0,
+            )
+            total_count = self._observed_count_ + chunk_count
+            fraction = np.divide(
+                chunk_count,
+                total_count,
+                out=np.zeros(n_features, dtype=float),
+                where=total_count > 0,
+            )
+            self._running_mean_ += (chunk_mean - self._running_mean_) * fraction
+            self._observed_count_ = total_count
+            self.statistics_ = np.where(
+                total_count > 0, self._running_mean_, self.fill_value
+            )
+        else:
+            for column in range(n_features):
+                values = X[valid[:, column], column]
+                if values.size:
+                    self._median_values_[column] = np.concatenate(
+                        (self._median_values_[column], values)
+                    )
+            self._observed_count_ += chunk_count
+            self.statistics_ = np.array(
+                [
+                    np.median(values) if values.size else self.fill_value
+                    for values in self._median_values_
+                ],
+                dtype=float,
+            )
         return self
 
     def transform(self, X: np.ndarray) -> np.ndarray:
@@ -632,17 +771,48 @@ class OneHotEncoder:
         Time: O(d * n * log(n)); space O(n * d + c), where n is sample count,
         d feature count and c total categories, assuming bounded string lengths.
         """
+        self.__dict__.pop("categories_", None)
+        self.__dict__.pop("n_features_in_", None)
+        self.__dict__.pop("n_features_out_", None)
+        return self.partial_fit(X)
+
+    def partial_fit(self, X: np.ndarray) -> "OneHotEncoder":
+        """Learn additional categories without changing existing output columns.
+
+        Categories first seen in a chunk are appended in sorted order to each
+        feature's existing category block. This preserves the encoded meaning
+        of all columns learned from earlier chunks.
+        """
         X = np.asarray(X).astype(str)
         if X.ndim != 2 or X.size == 0:
             raise ValueError(f"X must be a non-empty 2-D array, got shape {X.shape}")
+        if hasattr(self, "n_features_in_") and X.shape[1] != self.n_features_in_:
+            raise ValueError(f"expected {self.n_features_in_} features, got shape {X.shape}")
+        if not hasattr(self, "categories_"):
+            self.n_features_in_ = X.shape[1]
+            self.categories_ = [np.empty(0, dtype=str) for _ in range(X.shape[1])]
+            self._category_columns_ = [
+                np.empty(0, dtype=np.int64) for _ in range(X.shape[1])
+            ]
+            self.n_features_out_ = 0
 
-        self.categories_ = []
-        for column in X.T:
+        updated_categories = []
+        updated_columns = []
+        next_output_column = self.n_features_out_
+        for existing, existing_columns, column in zip(
+            self.categories_, self._category_columns_, X.T
+        ):
             present = ~np.isin(column, self.MISSING)
-            self.categories_.append(np.unique(column[present]))
-
-        self.n_features_in_ = X.shape[1]
-        self.n_features_out_ = sum(len(categories) for categories in self.categories_)
+            additions = np.setdiff1d(np.unique(column[present]), existing)
+            updated_categories.append(np.concatenate((existing, additions)))
+            added_columns = np.arange(
+                next_output_column, next_output_column + additions.size
+            )
+            updated_columns.append(np.concatenate((existing_columns, added_columns)))
+            next_output_column += additions.size
+        self.categories_ = updated_categories
+        self._category_columns_ = updated_columns
+        self.n_features_out_ = next_output_column
         return self
 
     def transform(self, X: np.ndarray) -> np.ndarray:
@@ -678,8 +848,9 @@ class OneHotEncoder:
         _check_fitted(self, X)
 
         out = np.zeros((X.shape[0], self.n_features_out_))
-        start = 0
-        for j, categories in enumerate(self.categories_):
+        for j, (categories, output_columns) in enumerate(
+            zip(self.categories_, self._category_columns_)
+        ):
             column = X[:, j]
             block = column[:, None] == categories          # (n, c) by broadcasting
             present = ~np.isin(column, self.MISSING)
@@ -687,8 +858,7 @@ class OneHotEncoder:
             if unknown.any() and self.handle_unknown == "error":
                 raise ValueError(f"unknown categories in column {j}: {np.unique(column[unknown]).tolist()}")
 
-            out[:, start:start + len(categories)] = block
-            start += len(categories)
+            out[:, output_columns] = block
         return out
 
     def fit_transform(self, X: np.ndarray) -> np.ndarray:

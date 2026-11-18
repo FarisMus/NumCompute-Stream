@@ -1,12 +1,11 @@
 # NumCompute
 
-P_AI Assignment 2.1, 2026 S2
+P_AI Assignment 2.2, 2026 S2
 
-Group name: 404 Group Not Found
 
-Demo video link: [A2_Demo_v3](https://drive.google.com/file/d/1OQFyF7AuDpzgdBwg2_W-SpvhwnJK2zzi/view?usp=sharing)
+Individual demo Video: [Demo Video](https://drive.google.com/file/d/1d1mMC6MFTUDIKJEdqVDnHfjkV6nBEslm/view?usp=drive_link)
 
-A scientific computing toolkit built with Python and NumPy. It includes CSV input, preprocessing, sorting/searching, ranking, statistics, metrics, numerical derivatives, pipelines and reproducible benchmarks.
+A scientific computing toolkit built with Python and NumPy. It includes CSV input, preprocessing, sorting/searching, ranking, statistics, metrics, numerical derivatives, pipelines and reproducible benchmarks. The NumCompute-Stream extension adds chunk-based training, a buffered decision tree and streaming visualizations.
 
 ## Required structure
 
@@ -27,14 +26,21 @@ NumCompute/
 │   ├── pipeline.py
 │   ├── utils.py
 │   └── benchmarking.py
+├── numcompute_stream/
+│   ├── init.py
+│   ├── stream.py
+│   ├── tree.py
+│   └── visualise.py
 ├── tests/
 │   └── README.md
 ├── benchmark/
 │   ├── loops.py              # plain-Python versions (the "loop" side)
 │   ├── run_benchmarks.py     # seeded runner, writes results.md
+│   ├── stream_benchmark.py   # streaming buffer and accuracy comparisons
 │   └── results.md            # latest full run
 └── demo/
     ├── quickstart.ipynb
+    ├── stream_demo.ipynb
     ├── generate_sample.py
     ├── data/
     │   └── sample.csv
@@ -56,8 +62,9 @@ NumCompute/
 Requires Python 3.10+ and NumPy (no other runtime dependencies).
 
 ```bash
-git clone https://github.com/DahaoALG/NumCompute.git
-cd NumCompute
+git clone https://github.com/FarisMus/NumCompute-Stream.git
+cd NumCompute-Stream
+git switch assignment-2/faris-musthafa       # or the branch containing the streaming extension
 python -m venv .venv
 .venv\Scripts\activate          # Windows; on macOS/Linux: source .venv/bin/activate
 pip install -e ".[test]"        # editable install of numcompute, plus pytest
@@ -71,6 +78,53 @@ python -m pip install ipython ipykernel
 ```
 
 Then open `demo/quickstart.ipynb` and select the `.venv` interpreter as the kernel in your notebook editor.
+
+For streaming plots and the standalone streaming notebook, install the visualization extra:
+
+```bash
+python -m pip install -e ".[visualization]"
+```
+
+Open `demo/stream_demo.ipynb`, select the environment as its kernel, restart the kernel and choose **Run All**. The notebook loads `demo/data/sample.csv`, trains on ordered chunks, evaluates a separate holdout set, displays plots and compares buffer sizes. It loads the CSV into memory before chunking, so it simulates a stream rather than reading the file incrementally.
+
+## NumCompute-Stream quick start
+
+The following example trains on two chunks and scores a separate holdout chunk. Run it from the project root after installation:
+
+```python
+import numpy as np
+from numcompute.metrics import StreamingMetrics
+from numcompute.pipeline import Pipeline
+from numcompute_stream.stream import StreamTrainer
+from numcompute_stream.tree import DecisionTreeClassifier
+
+X_train = np.array([[1.0, 10.0], [2.0, 12.0], [8.0, 30.0], [9.0, 32.0]])
+y_train = np.array(["low", "low", "high", "high"])
+X_holdout = np.array([[1.5, 11.0], [8.5, 31.0]])
+y_holdout = np.array(["low", "high"])
+
+tree = DecisionTreeClassifier(max_depth=3, buffer_size=4)
+pipeline = Pipeline([("tree", tree)])
+trainer = StreamTrainer(tree, pipeline=pipeline)
+
+for start in range(0, len(y_train), 2):
+    trainer.fit_chunk(X_train[start:start + 2], y_train[start:start + 2])
+
+print("Holdout accuracy:", trainer.score_chunk(X_holdout, y_holdout))
+predictions = pipeline.predict(X_holdout)
+metrics = StreamingMetrics(average="macro", window_size=4)
+metrics.update(y_holdout, predictions)
+print("Predictions:", predictions)
+print("Macro F1:", metrics.result()["f1"])
+print("Rolling accuracy:", metrics.rolling_result()["accuracy"])
+print("Training and scoring logs:", trainer.get_history())
+```
+
+`StreamTrainer` uses the supplied pipeline for training and prediction; without a pipeline, it uses the model directly. It prefers `partial_fit` and falls back to `fit` if the estimator has no `partial_fit`. `get_history()` returns logged entries, and `reset()` clears the history and cumulative scoring counters, not the model.
+
+The tree trains only when its buffer contains at least `buffer_size` rows. A chunk can cross the threshold, so a retrain may use more rows than the threshold. Until the first retrain, prediction and scoring fail because no fitted tree exists; afterwards, the previous tree remains available between retrains. Each retrain uses only rows buffered since the last retrain. Rows left below the threshold remain pending, and calling `fit()` replaces the tree and clears them.
+
+Use raw features with the buffered tree or ensure preprocessing stays consistent across chunks: an updating scaler can place rows in different coordinate systems within one buffer. The tree predicts labels, not probability scores, so the example does not calculate AUC. For running statistics and additional metric options, see the statistics and evaluation sections below; for plots and buffer-size benchmarks, see the visualization and benchmarking sections.
 
 ## API overview and examples
 
@@ -202,8 +256,15 @@ quartiles = percentile([0, 10, 20, 30], [25, 50, 75])  # [7.5, 15.0, 22.5]
 | `RunningStats()`                             | `skip_nan=False`                                                                                                                                          | An empty RunningStats accumulator with n=0; per-feature mean, m2, min and max arrays are created when a retained batch is first added.                              | Maintain mean, variance, minimum and maximum across successive batches using Chan/Welford moment merging, keeping persistent storage proportional to the feature count. |
 | `running.update(x)`                          | Scalar, `(b,)` single-feature samples, or `(b, d)` batch                                                                                                | The same accumulator (`self`), with n and feature statistics updated. Empty batches, including batches fully removed by skip_nan, leave its state unchanged.      | Merge a new batch into previously stored moments. A 1-D vector represents many samples of one feature; skip_nan=True drops any row containing NaN.                      |
 | `running.var()`, `running.std()`           | `ddof=0`                                                                                                                                                  | A NumPy array `(d,)` containing variance or standard deviation for each feature over all retained rows, using denominator `n - ddof`.                           | Read the accumulated feature spread without reloading previous batches. Data must already have been added and the retained row count must exceed ddof.                  |
+| `StreamingStats()`                           | `skip_nan=False`; `window_size=None`                                                                                                                    | An accumulator with `update_stats()`, `mean`, `var()`, `std()`, `quantile()` and `histogram()` over all rows or a rolling window.                              | Maintain chunk-updated moments and exact quantiles/histograms. A window size bounds retained history and makes all results describe the latest rows.                     |
 
 For `(n, d)` data, `axis=0` summarizes each feature and `axis=1` each row; `axis=None` reduces all values. `skip_nan=False` propagates NaNs and True ignores them in batch reductions. In contrast, `RunningStats(skip_nan=True)` drops entire rows containing NaN; `running.n` counts retained rows and `running.mean` contains per-feature means.
+
+`StreamingStats.update_stats(X_chunk)` is the stateful chunk API. Exact
+quantiles require retaining the observations: without `window_size`, history
+uses O(total rows * features) memory; with a window, only the most recent
+`window_size` rows are retained and moments, quantiles and histograms all use
+that same window.
 
 - `ddof=0`: population variance/standard deviation; `ddof=1` gives the sample estimate. The included value/row count must exceed ddof.
 - `quantile(method="linear")`: interpolate between adjacent sample values. `"lower"`/`"higher"` choose the lower/upper value, `"midpoint"` averages them and `"nearest"` selects the nearest.
@@ -226,6 +287,9 @@ counts, edges = stats.histogram(X[:, 0], bins=2)       # [1, 2], [1, 3, 5]
 running = stats.RunningStats(skip_nan=True)
 running.update(X[:2]).update(X[2:])
 print(running.n, running.mean, running.var())         # 2, [3, 20], [4, 100]
+stream = stats.StreamingStats(window_size=100)
+stream.update_stats(X[:2]).update_stats(X[2:])
+print(stream.quantile(0.5), stream.histogram(bins=5)[0])
 ```
 
 ### `numcompute.metrics`: evaluation
@@ -241,6 +305,10 @@ print(running.n, running.mean, running.var())         # 2, [3, 20], [4, 100]
 | `roc_curve()`        | `y_true`, `y_score`; `pos_label=1`                                                             | `fpr, tpr, thresholds`, each shape `(m + 1,)` for `m` distinct scores | Evaluate binary classification across score thresholds by calculating false-positive and true-positive rates. Samples with tied scores cross a threshold together (bonus). |
 | `auc()`              | Equal-length `x`, `y`; `x` monotonic                                                           | Area under any monotonic curve (trapezoid rule), `float`                  | Integrate supplied curve points with the trapezoid rule. With ROC false-positive/true-positive rates as inputs, summarize binary discrimination with ROC AUC (bonus).      |
 
+| API | Parameters | Return | Purpose |
+| --- | --- | --- | --- |
+| `StreamingMetrics()` | `average="binary"`; `pos_label=1`; `zero_division=0.0`; `labels=None`; `window_size=None` | Accumulator with `update()`, `reset()`, `result()` and optional `rolling_result()`; results include accuracy, precision, recall, F1, confusion matrix and AUC. | Accumulate classification metrics chunk by chunk; classes may be discovered as data arrives, while an optional window produces rolling metrics. |
+
 Options shared by `precision`, `recall` and `f1`:
 
 - `average="binary"`: score only pos_label (at most two observed classes); `"macro"`: unweighted mean of class scores; `"micro"`: pool class counts before scoring; `"weighted"`: weight class scores by their true sample counts; None: return scores for each class in sorted label order.
@@ -248,6 +316,13 @@ Options shared by `precision`, `recall` and `f1`:
 - `zero_division=0.0`: replacement when a score denominator is zero; supply a non-NaN numeric value (not a boolean) to customize it.
 
 For `confusion_matrix`, `labels=None` selects sorted observed classes; supply a unique label sequence to choose the row/column order. It must include every observed class and may include extra classes. Use `average="macro"` for the six-city example. Inputs must be nonempty 1-D arrays without NaN and classification labels must have compatible types. Exclude rows with blank true city labels before evaluating predictions.
+
+`StreamingMetrics.update(y_true_chunk, y_pred_chunk, y_score=None)` updates
+cumulative counts. Supply `y_score` on every chunk to accumulate exact binary
+ROC AUC (scores are for `pos_label`); those score/label pairs are retained, so
+cumulative AUC uses O(total samples) memory. Setting `window_size` enables
+`rolling_result()` over the most recent samples, including rolling confusion
+matrix and AUC. Call `reset()` to clear state while retaining configuration.
 
 ```python
 from numcompute import metrics
@@ -261,6 +336,10 @@ matrix = metrics.confusion_matrix(y_true, y_pred)  # [[2, 0], [1, 1]]
 error = metrics.mse([1, 2, 3], [1, 2, 5])       # 1.333...
 fpr, tpr, thresholds = metrics.roc_curve([0, 0, 1, 1], [0.1, 0.4, 0.35, 0.8])
 area = metrics.auc(fpr, tpr)                     # 0.75
+stream = metrics.StreamingMetrics(average="macro", window_size=100)
+stream.update(y_true[:2], y_pred[:2])
+stream.update(y_true[2:], y_pred[2:])
+print(stream.result()["accuracy"], stream.rolling_result()["confusion_matrix"])
 ```
 
 ### `numcompute.optim`: finite differences
@@ -288,6 +367,7 @@ print(J)                                          # about [[6, 1], [4, 3]]
 | ------------------------ | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `Pipeline()`           | `steps`: nonempty list of `(unique_name, component)` pairs              | A new unfitted Pipeline holding the supplied named component objects in order; components are stored by reference and fitted in place.            | Connect reusable preprocessing steps and an optional final estimator so each component receives the previous step's output through a consistent interface.               |
 | `pipe.fit()`           | `X` `(n, d)`; `y=None` (forwarded to a final estimator when supplied) | The same pipeline instance (`self`) after successful fitting; intermediate preprocessors and the final component retain their learned state.    | Fit and transform each intermediate step, then fit the final component. Targets y are passed only to a final estimator providing predict when y is supplied.             |
+| `pipe.partial_fit()`   | `X` `(n, d)`; `y=None` | The same pipeline instance after a successful chunk update. | Incrementally update and transform through intermediate steps, then update the final component. |
 | `pipe.transform()`     | New `X` with compatible features                                          | The final transformer's output, usually a NumPy array `(n, c)`; the number of columns depends on the transformations, such as one-hot encoding. | Pass new rows through every fitted transformer in sequence without relearning statistics. The final component must also provide transform.                               |
 | `pipe.fit_transform()` | `X`; `y=None`; final step must provide `transform`                    | The transformed training data from the final transformer, usually `(n, c)`, with all learned preprocessing state retained in the pipeline.      | Fit the chain and then transform the same training input in one call. Intended for transformer-ending pipelines; estimator-only final steps instead use fit and predict. |
 | `pipe.predict()`       | New `X`; final step must provide `predict`                              | The final estimator's predictions, usually one label or numeric value per row `(n,)`; the estimator determines the exact output type and shape. | Transform new features using the fitted intermediate steps, then call the final estimator's predict method. Pipeline itself does not implement a prediction algorithm.   |
@@ -306,6 +386,32 @@ pipe = Pipeline([
 X_train = np.array([[1.0], [np.nan], [3.0]])
 X_ready = pipe.fit_transform(X_train)             # about [[-1.225], [0], [1.225]]
 new_ready = pipe.transform([[2.0]])               # [[0.0]]; no refitting
+```
+
+### `numcompute_stream.visualise`: streaming plots
+
+Matplotlib is an optional dependency and is imported only when a plotting
+function is called. Install it with `python -m pip install -e ".[visualization]"`
+(or `python -m pip install matplotlib`).
+
+| Function | Parameters | Return | Purpose |
+| -------- | ---------- | ------ | ------- |
+| `plot_metric_over_time()` | `metric_values`, `title`, `ylabel`; optional `save_path`, `show`, `ax` | `(figure, axes)` | Plot one numeric metric value per chunk. |
+| `compare_models()` | `metric1`, `metric2`, `labels`; optional `save_path`, `show`, `ax` | `(figure, axes)` | Compare two model metric histories; histories may have different lengths. |
+| `plot_predictions_vs_ground_truth()` | `y_true`, `y_pred`; optional `save_path`, `show`, `ax` | `(figure, axes)` | Compare categorical predictions and labels across the samples in a chunk. |
+
+Plots are returned for further customization and are not displayed unless
+`show=True`. Supply `save_path` to write the figure to a file.
+
+```python
+from numcompute_stream.visualise import plot_metric_over_time
+
+fig, ax = plot_metric_over_time(
+    [0.72, 0.78, 0.81],
+    title="Holdout accuracy",
+    ylabel="Accuracy",
+    save_path="accuracy.png",
+)
 ```
 
 ### `numcompute.utils`: batching and numerically stable helpers
@@ -342,6 +448,13 @@ print(pairwise_distances([[0.0, 0.0], [3.0, 4.0]]))    # [[0. 5.] [5. 0.]]
 | `format_table()`     | `rows`: list of comparison dicts                                                              | `compare` results as a Markdown table (the columns of the performance table below); an optional `"notes"` entry in a row fills the Notes column | Turn comparison dictionaries into a readable Markdown performance table with timing, speedup and optional explanatory notes for the README or notebook. |
 
 Loop baselines live separately in `benchmark/loops.py`. Data generation and array-to-list conversion happen before timing. `compare` first checks matching results, then reports median runtimes and `speedup = loop_s / vec_s`. Rank, top-k and AUC cases compare algorithm choices as well as vectorization.
+
+For streaming scenarios, `demo/stream_demo.ipynb` uses `benchmark.stream_benchmark`
+to compare tree buffer sizes on the same ordered training chunks and holdout
+rows. It reports retraining count, pending buffered rows, median total chunk
+update time, median time spent inside tree retrains, and holdout accuracy.
+It also checks and times loop-based versus NumPy cumulative accuracy on the
+same prediction chunks. Measurements vary by machine and load.
 
 The following 10 Python-loop baselines are available in `benchmark/loops.py` through `from benchmark import loops`:
 
@@ -408,7 +521,7 @@ Run all tests from the project root after installing the test dependencies with 
 python -m pytest tests -q
 ```
 
-Latest local verification (25 October 2026): **212 tests passed** across 10 test files, using Python 3.14.7 and NumPy 2.5.4.
+Latest local verification (19 November 2026): **266 tests passed** across 12 test files.
 
 | Test file                 | Coverage                                                                                                                                                        |
 | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -416,12 +529,14 @@ Latest local verification (25 October 2026): **212 tests passed** across 10 test
 | `test_preprocessing.py` | Scaling results, constant columns, NaN handling, imputation strategies, categorical encoding, unseen categories and input validation.                           |
 | `test_sort_search.py`   | Sorting and stability, multi-key order, top-k values/indices and boundary k, quickselect, duplicate search results and insertion positions.                     |
 | `test_rank.py`          | Average/min/max/dense/ordinal ties, descending ranks, compatibility alias, percentile-rank methods, interpolation and NaN handling.                             |
-| `test_stats.py`         | Axis-wise summaries, quantile shapes, histogram counts/density, all-equal values and streaming moments with large-offset data.                                  |
-| `test_metrics.py`       | Classification and regression results, averaging modes, zero denominators, confusion-matrix label order, tied ROC scores and AUC.                               |
+| `test_stats.py`         | Axis-wise summaries, quantile shapes, histogram counts/density, stable running moments, chunk-updated quantiles/histograms and rolling-window statistics.       |
+| `test_metrics.py`       | Classification and regression results, averaging modes, confusion matrices, ROC/AUC, chunk accumulation, rolling windows, reset and streaming validation.          |
 | `test_optim.py`         | Forward/central differences against analytical derivatives, rectangular Jacobian orientation, invalid step sizes, changing output shapes and nonfinite results. |
 | `test_pipeline.py`      | Chained preprocessing, reuse of fitted parameters, estimator fit/predict dispatch, fitted-state errors, failed refits and feature-count checks.                 |
 | `test_utils.py`         | Array validation, row-batch views, lazy iterable batching, invalid batch sizes, overflow-free logsumexp/softmax/sigmoid, infinite/NaN inputs and distances far from the origin. |
 | `test_benchmarking.py`  | Timing output/call counts, result-equivalence checks, validation, environment/table formatting and all 10 quick benchmark cases through the runner.             |
+| `test_tree.py`          | Decision-tree splits, buffered retraining, fitted-state checks and invalid inputs. |
+| `test_visualise.py`     | Streaming plots, file saving, label handling and invalid inputs. |
 
 Edge cases include empty arrays, all-equal values, duplicates/ties, NaNs, non-contiguous array views and invalid types/shapes. Benchmark tests verify correctness and report generation rather than requiring a fixed runtime or speedup, since timings depend on the machine.
 
@@ -450,4 +565,4 @@ The dataset and generator described here follow the repository's `main` branch. 
 
 ### Demo files and directory structure
 
-The directory tree above includes `demo/generate_sample.py`, which generates `demo/data/sample.csv` reproducibly with seed 42, and `demo/quickstart.ipynb` for package demonstrations. The separate `demo/sample.csv` is an older 8-row example with an additional height column for older version testing. To reproduce the documented data, use the generator from `main`.
+The directory tree above includes `demo/generate_sample.py`, which generates `demo/data/sample.csv` reproducibly with seed 42, `demo/quickstart.ipynb` for package demonstrations, and `demo/stream_demo.ipynb` for chunked decision-tree training and evaluation. The separate `demo/sample.csv` is an older 8-row example with an additional height column for older version testing. To reproduce the documented data, use the generator from `main`.
